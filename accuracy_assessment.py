@@ -63,6 +63,8 @@ def compute_measure(ref_poly_geom, ext_poly_geoms, measure_to_compute):
 
        5. Intersection over Union
         - evaluates the overlap between reference and classified objects
+         - the area of overlap between the predicted (bounding box) and the target (bounding box), divided
+           by the area of their union.
 
        6. Shape similarity
         - compares the geometric form of a reference object with that of the classified objects
@@ -83,6 +85,8 @@ def compute_measure(ref_poly_geom, ext_poly_geoms, measure_to_compute):
 def main():
     ref_polys_fname = "data/reference_polygons.shp"
     ext_polys_fname = "data/otb_extracted_polygons.shp"
+
+    # TODO we really need to do this for the full set of data and then calculate the overall metric across the dataset
 
     # do accuracy assessment for 1 reference polygon
     ref_geoid = 413
