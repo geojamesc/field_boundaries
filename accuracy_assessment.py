@@ -25,9 +25,6 @@ def compare_reference_and_predicted_polygons(ref_polys_shp_fname, ref_polys_geoi
         have_pred_polys = True
 
     if have_ref_polys and have_pred_polys:
-        # TODO use rtree to speed things up rather than nasty brute force approach we have here at the moment
-        #  https://maptiks.com/blog/spatial-queries-in-python/
-
         measure_total = 0
         measure_occurences = 0
         measure_avg = 0
@@ -59,8 +56,6 @@ def compare_reference_and_predicted_polygons(ref_polys_shp_fname, ref_polys_geoi
                             pred_poly_geoms.append(pred_poly_geom)
 
                     measure_to_compute = 'intersection_over_union'
-
-                    # TODO calculate the measures for this reference polygon
                     measure = compute_measure(
                         ref_poly_geom=ref_poly_geom,
                         ext_poly_geoms=pred_poly_geoms,
