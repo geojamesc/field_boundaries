@@ -1,46 +1,85 @@
-import fiona
 import os
+import fiona
+import rtree
 from shapely.geometry import shape
 
 
-def fetch_polygons_to_compare(ref_polys_shp_fname, ext_polys_shp_fname, ref_geoid_fld_name, ext_geoid_fld_name, ref_geoid):
+def compare_reference_and_predicted_polygons(ref_polys_shp_fname, ref_polys_geoid_fldname, pred_polys_shp_fname, pred_polys_geoid_fldname, debug=True):
     """
-    for a given ref_geoid return the polygon geometry associated with this
-    from the input reference polygons shapefile and the set (list) of polygons
-    in a second shapefile e.g. those that were extracted by a segmentation algo
+    perform accuracy assessment between a set of reference and predicted polygons held in 2 shapefiles
+    uses rtree spatialindex to avoid doing bruteforce search for predicted polygons that intersect with
+    reference polygons and calculates measures like IOU
+
+    use of rtree based on https://maptiks.com/blog/spatial-queries-in-python/
 
     :param ref_polys_shp_fname:
-    :param ext_polys_shp_fname:
-    :param ref_geoid:
-    :return: shapely.geometry.polygon.Polygon [shapely.geometry.polygon.Polygon..n]
+    :param pred_polys_shp_fname:
+    :param debug:
+    :return:
     """
-    ref_poly_geom = None
-    ext_poly_geoms = []
-
     have_ref_polys = False
-    have_ext_polys = False
+    have_pred_polys = False
     if os.path.exists(ref_polys_shp_fname):
         have_ref_polys = True
-    if os.path.exists(ext_polys_shp_fname):
-        have_ext_polys = True
+    if os.path.exists(pred_polys_shp_fname):
+        have_pred_polys = True
 
-    if have_ref_polys and have_ext_polys:
+    if have_ref_polys and have_pred_polys:
         # TODO use rtree to speed things up rather than nasty brute force approach we have here at the moment
         #  https://maptiks.com/blog/spatial-queries-in-python/
 
-        with fiona.open(ref_polys_shp_fname, "r") as ref_polys_src:
-            with fiona.open(ext_polys_shp_fname, "r") as ext_polys_src:
-                for ref_poly  in ref_polys_src:
-                    if ref_poly["properties"][ref_geoid_fld_name] == ref_geoid:
-                        ref_poly_geoid = ref_poly["properties"][ref_geoid_fld_name]
-                        ref_poly_geom = shape(ref_poly["geometry"])
-                        for ext_poly in ext_polys_src:
-                            ext_poly_geoid = ext_poly["properties"][ext_geoid_fld_name]
-                            ext_poly_geom = shape(ext_poly["geometry"])
-                            if ext_poly_geom.intersects(ref_poly_geom):
-                                ext_poly_geoms.append(ext_poly_geom)
+        measure_total = 0
+        measure_occurences = 0
+        measure_avg = 0
 
-    return ref_poly_geom, ext_poly_geoms
+        with fiona.open(ref_polys_shp_fname, "r") as ref_polys_src:
+            with fiona.open(pred_polys_shp_fname, "r") as pred_polys_src:
+                idx_fname, _ = os.path.splitext(pred_polys_shp_fname)
+                if os.path.exists(idx_fname + '.dat') and os.path.exists(idx_fname + '.idx'):
+                    print('Loading existing spatial index from file...\n')
+                    pred_polys_idx = rtree.index.Index(idx_fname)
+                else:
+                    print('Generating new spatial index for {0}...\n'.format(pred_polys_shp_fname))
+                    pred_polys_idx = generate_spatial_index(pred_polys_src, idx_fname)
+
+                for ref_poly in ref_polys_src:
+                    ref_poly_geom = None
+                    pred_poly_geoms = []
+                    ref_poly_geoid = ref_poly["properties"][ref_polys_geoid_fldname]
+                    ref_poly_geom = shape(ref_poly["geometry"])
+
+                    # do bounds query against the spatial index
+                    for fid in pred_polys_idx.intersection(ref_poly_geom.bounds):
+                        # then check which of the polygons returned by the bounds more precisely intersect
+                        pred_poly_geom = shape(pred_polys_src[fid]["geometry"])
+                        if ref_poly_geom.intersects(pred_poly_geom):
+                            pred_poly_geoid = pred_polys_src[fid]["properties"][pred_polys_geoid_fldname]
+                            if debug:
+                                print('Ref(erence) poly geoid: {0} isects with Pred(icted) poly geoid: {1}'.format(ref_poly_geoid, pred_poly_geoid))
+                            pred_poly_geoms.append(pred_poly_geom)
+
+                    measure_to_compute = 'intersection_over_union'
+
+                    # TODO calculate the measures for this reference polygon
+                    measure = compute_measure(
+                        ref_poly_geom=ref_poly_geom,
+                        ext_poly_geoms=pred_poly_geoms,
+                        measure_to_compute=measure_to_compute
+                    )
+
+                    if measure is not None:
+                        print("\t{0} Calc Result: {1} (0 = worst accuracy; 1 = best accuracy)".format(
+                            measure_to_compute, measure)
+                        )
+                        measure_total += measure
+                        measure_occurences += 1
+                    else:
+                        print("\t{0} could not be calculated".format(measure_to_compute))
+
+        measure_avg = measure_total / measure_occurences
+        print("\nAcross dataset: {0} averaged is: {1} (0 = worst accuracy; 1 = best accuracy), based on IOU total: {2} for {3} occurences.".format(
+            measure_to_compute, measure_avg, measure_total, measure_occurences)
+        )
 
 
 def compute_measure(ref_poly_geom, ext_poly_geoms, measure_to_compute):
@@ -82,10 +121,8 @@ def compute_measure(ref_poly_geom, ext_poly_geoms, measure_to_compute):
             # the reference polygon
             p1 = ref_poly_geom
 
-            # the predicted polygon
-            # sometimes we will have 1:M, for now just grab first other poly
-            #for g in ext_poly_geoms:
-            #    print("Comparison Poly Geom: ", type(g))
+            # TODO at moment we are only grabbing 1 of the predicted polygons that intersect with the reference polygon
+            #  this is likely, mostly not to be the case
             p2 = ext_poly_geoms[0]
 
             # use shapely to compute intersection over union
@@ -94,39 +131,39 @@ def compute_measure(ref_poly_geom, ext_poly_geoms, measure_to_compute):
     return computed_measure
 
 
+def generate_spatial_index(records, index_path=None):
+    """
+    Create in-memory or file-based r-tree index
+    from https://maptiks.com/blog/spatial-queries-in-python/
+
+    :param records:
+    :param index_path:
+    :return:
+    """
+    prop = rtree.index.Property()
+    if index_path is not None:
+        prop.storage = rtree.index.RT_Disk
+        prop.overwrite = index_path
+
+    sp_index = rtree.index.Index(index_path, properties=prop)
+    for n, ft in enumerate(records):
+        if ft['geometry'] is not None:
+            sp_index.insert(n, shape(ft['geometry']).bounds)
+    return sp_index
+
+
 def main():
     ref_polys_fname = "data/simple_reference_polygons.shp"
     ext_polys_fname = "data/simple_extracted_polygons.shp"
 
-    # names of geoid fieldnames in vector input files
-    ref_geoid_fld_name = "id"
-    ext_geoid_fld_name = "id"
-
-    # TODO at moment just doing the calc for 1 feature, the id of which, the user has supplied
-    #  really we want to do this for all features
-    ##################################################################################
-    # set this to the id of reference polygon we want to find predicted polygon(s) for
-    ref_geoid = 2
-    ##################################################################################
-
-    # fetch the reference poly geometry and the intersecting predicted polygons
-
-    # TODO at the moment doing this by brute force by comparing all predicted polygons with the reference polygon
-    #  this approach won`t scale beyond a trivial dataset so instead use a file/memory spatial index implemented
-    #   using py rtree
-    ref_poly_geom, ext_poly_geoms = fetch_polygons_to_compare(ref_polys_fname, ext_polys_fname, ref_geoid_fld_name, ext_geoid_fld_name, ref_geoid)
-
-    # compute iou measure
-    iou = compute_measure(
-        ref_poly_geom,
-        ext_poly_geoms,
-        measure_to_compute="intersection_over_union"
+    # TODO add cli with click
+    compare_reference_and_predicted_polygons(
+        ref_polys_shp_fname=ref_polys_fname,
+        ref_polys_geoid_fldname="id",
+        pred_polys_shp_fname=ext_polys_fname,
+        pred_polys_geoid_fldname="id",
+        debug=True
     )
-
-    if iou is not None:
-        print("IOU Calc Result: {0} (0 = worst accuracy; 1 = best accuracy)".format(iou))
-    else:
-        print("IOU could not be calculated")
 
 
 if __name__ == "__main__":
