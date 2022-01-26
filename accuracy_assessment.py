@@ -2,6 +2,7 @@ import os
 import fiona
 import rtree
 from shapely.geometry import shape
+from shapely.errors import TopologicalError
 
 
 def compare_reference_and_predicted_polygons(ref_polys_shp_fname, ref_polys_geoid_fldname, pred_polys_shp_fname, pred_polys_geoid_fldname, debug=True):
@@ -28,8 +29,10 @@ def compare_reference_and_predicted_polygons(ref_polys_shp_fname, ref_polys_geoi
         measure_total = 0
         measure_occurences = 0
         measure_avg = 0
+        ref_poly_counter = 1
 
         with fiona.open(ref_polys_shp_fname, "r") as ref_polys_src:
+            num_ref_polys = len(ref_polys_src)
             with fiona.open(pred_polys_shp_fname, "r") as pred_polys_src:
                 idx_fname, _ = os.path.splitext(pred_polys_shp_fname)
                 if os.path.exists(idx_fname + '.dat') and os.path.exists(idx_fname + '.idx'):
@@ -45,6 +48,7 @@ def compare_reference_and_predicted_polygons(ref_polys_shp_fname, ref_polys_geoi
                     ref_poly_geoid = ref_poly["properties"][ref_polys_geoid_fldname]
                     ref_poly_geom = shape(ref_poly["geometry"])
 
+                    print('Comparing reference poly {0} of {1} against predicted polygons'.format(ref_poly_counter, num_ref_polys))
                     # do bounds query against the spatial index
                     for fid in pred_polys_idx.intersection(ref_poly_geom.bounds):
                         # then check which of the polygons returned by the bounds more precisely intersect
@@ -55,25 +59,35 @@ def compare_reference_and_predicted_polygons(ref_polys_shp_fname, ref_polys_geoi
                                 print('Ref(erence) poly geoid: {0} isects with Pred(icted) poly geoid: {1}'.format(ref_poly_geoid, pred_poly_geoid))
                             pred_poly_geoms.append(pred_poly_geom)
 
-                    measure_to_compute = 'intersection_over_union'
-                    measure = compute_measure(
-                        ref_poly_geom=ref_poly_geom,
-                        ext_poly_geoms=pred_poly_geoms,
-                        measure_to_compute=measure_to_compute
-                    )
-
-                    if measure is not None:
-                        print("\t{0} Calc Result: {1} (0 = worst accuracy; 1 = best accuracy)".format(
-                            measure_to_compute, measure)
+                    # only compute measure if at least 1 predicted polygon that intersects with the reference polygon
+                    if len(pred_poly_geoms) > 0:
+                        measure_to_compute = 'intersection_over_union'
+                        measure = compute_measure(
+                            ref_poly_geom=ref_poly_geom,
+                            ext_poly_geoms=pred_poly_geoms,
+                            measure_to_compute=measure_to_compute
                         )
-                        measure_total += measure
-                        measure_occurences += 1
+
+                        if measure is not None:
+                            if debug:
+                                print("\tHighest {0} Calc Result: {1} (0 = worst accuracy; 1 = best accuracy)".format(
+                                    measure_to_compute, round(measure,4))
+                                )
+                            measure_total += measure
+                            measure_occurences += 1
+                        else:
+                            if debug:
+                                print("\t{0} could not be calculated".format(measure_to_compute))
+                            else:
+                                pass
                     else:
-                        print("\t{0} could not be calculated".format(measure_to_compute))
+                        if debug:
+                            print('Ref(erence) poly geoid: {0} isects zero Pred(icted) polys, so excluded from consideration.'.format(ref_poly_geoid))
+                    ref_poly_counter += 1
 
         measure_avg = measure_total / measure_occurences
         print("\nAcross dataset: {0} averaged is: {1} (0 = worst accuracy; 1 = best accuracy), based on IOU total: {2} for {3} occurences.".format(
-            measure_to_compute, measure_avg, measure_total, measure_occurences)
+            measure_to_compute, round(measure_avg, 4), round(measure_total,4), measure_occurences)
         )
 
 
@@ -116,12 +130,22 @@ def compute_measure(ref_poly_geom, ext_poly_geoms, measure_to_compute):
             # the reference polygon
             p1 = ref_poly_geom
 
-            # TODO at moment we are only grabbing 1 of the predicted polygons that intersect with the reference polygon
-            #  this is likely, mostly not to be the case
-            p2 = ext_poly_geoms[0]
-
-            # use shapely to compute intersection over union
-            computed_measure = round(p1.intersection(p2).area / p1.union(p2).area, 4)
+            # in many cases there will be multiple predicted polygons that intersect with the reference polygon
+            # especially where there has been oversegmentation. So return the maximum value of iou. Possibly we
+            # should be applying something like non-maximum-suppression
+            # https://learnopencv.com/non-maximum-suppression-theory-and-implementation-in-pytorch/
+            max_iou = 0
+            for p2 in ext_poly_geoms:
+                # use shapely to compute intersection over union
+                try:
+                    iou = p1.intersection(p2).area / p1.union(p2).area
+                    if iou > max_iou:
+                        max_iou = iou
+                except TopologicalError as ex:
+                    # shapely will raise a TopologicalError when doing geometry operations like intersection or union
+                    # if any of the geometries involved are invalid e.g. contain self-intersections etc
+                    print(ex)
+            computed_measure = max_iou
 
     return computed_measure
 
@@ -148,16 +172,24 @@ def generate_spatial_index(records, index_path=None):
 
 
 def main():
-    ref_polys_fname = "data/simple_reference_polygons.shp"
-    ext_polys_fname = "data/simple_extracted_polygons.shp"
+    # this is a tiny set of reference and predicted polygons for dev purposes
+    # compare_reference_and_predicted_polygons(
+    #     ref_polys_shp_fname="data/simple_reference_polygons.shp",
+    #     ref_polys_geoid_fldname="id",
+    #     pred_polys_shp_fname="data/simple_extracted_polygons.shp",
+    #     pred_polys_geoid_fldname="id",
+    #     debug=False
+    # )
 
-    # TODO add cli with click
+    # this is the complete set of SGov Kelso reference polygons compared to the
+    # set of polygons that we used OTB meanshift segmentation to extract from a
+    # single scene of Sentinel-2 data
     compare_reference_and_predicted_polygons(
-        ref_polys_shp_fname=ref_polys_fname,
-        ref_polys_geoid_fldname="id",
-        pred_polys_shp_fname=ext_polys_fname,
-        pred_polys_geoid_fldname="id",
-        debug=True
+        ref_polys_shp_fname="data/reference_polygons.shp",
+        ref_polys_geoid_fldname="geoid",
+        pred_polys_shp_fname="data/otb_extracted_polygons.shp",
+        pred_polys_geoid_fldname="geoid",
+        debug=False
     )
 
 
