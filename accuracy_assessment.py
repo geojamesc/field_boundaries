@@ -5,6 +5,8 @@ from shapely.geometry import shape
 from shapely.errors import TopologicalError
 
 
+# TODO Suggestion from Simon was might be worth buffering the reference and predicted polygons to filter out the small
+#  noise along the boundaries
 def compare_reference_and_predicted_polygons(ref_polys_shp_fname, ref_polys_geoid_fldname, pred_polys_shp_fname, pred_polys_geoid_fldname, debug=True):
     """
     perform accuracy assessment between a set of reference and predicted polygons held in 2 shapefiles
